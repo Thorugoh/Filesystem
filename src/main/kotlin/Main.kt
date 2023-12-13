@@ -1,69 +1,89 @@
+import io.ktor.http.*
+import io.ktor.http.content.*
+import io.ktor.server.application.*
+import io.ktor.server.engine.*
+import io.ktor.server.netty.*
+import io.ktor.server.request.*
+import io.ktor.server.response.*
+import io.ktor.server.routing.*
+import java.nio.file.FileSystems
+import java.nio.file.Files
+import java.nio.file.Paths
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import kotlin.io.path.readText
+import kotlin.io.path.writeText
+import kotlin.streams.toList
 
-open class File(val name: String, var content: String) {
-    override fun toString(): String {
-        return name;
-    }
-}
+const val FOLDER = "C:\\Users\\thoru\\Documents"
+const val TRASH = "C:\\Users\\thoru\\Trash"
 
 object FileShareManager {
-    private val files = mutableMapOf<String, File>()
-    private val deletedFiles = mutableMapOf<String, File>()
     private val keyGenerator = KeyGenerator.getInstance("AES").apply { init(128) }
-    private val secretKey: SecretKey = keyGenerator.generateKey()
-    private val crypto = Crypto();
 
-    fun saveFile(file: File) {
-        val encryptedFile = File(file.name, crypto.encrypt(file.content, secretKey));
-        files[file.name] = encryptedFile
+    fun listFiles(): List<String> {
+       val folderPath = Paths.get(FOLDER)
+        val files = Files.list(folderPath)
+            .filter { Files.isRegularFile(it) }
+            .map { path -> path.fileName.toString() }
+            .toList()
+
+        return files;
     }
 
-    fun restoreFile(name: String) : File? {
-        return deletedFiles[name]?.also {
-            files[name] = it
-            deletedFiles.remove(name)
-        }
-    }
-
-    fun deleteFile(name: String) {
-        files[name]?.also {
-            deletedFiles[name] = it
-            files.remove(name)
-        }
-    }
-
-    fun listFiles(): List<File> {
-        return files.values.toList()
-    }
-
-    fun searchFiles(query: String): List<File> {
-        return files.values.filter {
-            it.name.contains(query, ignoreCase = true)
-        }
-    }
-
-    fun readFile(query: String) {
-        val files = searchFiles(query)
-        if(files.size == 1){
-            println(crypto.decrypt(files[0].content, secretKey))
-        }
-    }
 }
 
 fun main(args: Array<String>) {
-    val file1 = File("doc1", "Hello World")
-    FileShareManager.saveFile(file1)
+    embeddedServer(Netty, port = 8080) {
+        routing {
+            get("/files") {
+                call.respondText(
+                    text = FileShareManager.listFiles().toString(),
+                    contentType = ContentType.Application.Json,
+                    status = HttpStatusCode.OK
+                )
+            }
 
-    val file2 = File("doc2", "Some Content")
-    FileShareManager.saveFile(file2)
+            post("/files") {
+                val multipart = call.receiveMultipart()
+                multipart.forEachPart { part ->
+                    if(part is PartData.FileItem) {
+                        println(part)
+                        val name = part.originalFileName!!
+                        val file = java.io.File("$FOLDER\\$name")
 
-    println(FileShareManager.listFiles())
-    FileShareManager.deleteFile("doc1")
-    println(FileShareManager.listFiles())
+                        part.streamProvider().use { its ->
+                            file.outputStream().use {
+                                its.copyTo(it)
+                            }
+                        }
+                    }
+                    part.dispose()
+                }
+            }
 
-    FileShareManager.restoreFile("doc1")
-    println(FileShareManager.listFiles())
+            delete("/files/{name}") {
+                val filename = call.parameters["name"]!!
+                val file = java.io.File("$FOLDER\\$filename")
+                if(file.exists()) {
+                    file.copyTo(java.io.File("$TRASH\\$filename"))
+                    file.delete()
+                    call.respond(HttpStatusCode.OK)
+                }
+                else call.respond(HttpStatusCode.NotFound)
+            }
 
-    FileShareManager.readFile("doc1")
+            post("/files/{name}/restore") {
+                val filename = call.parameters["name"]!!
+                val file = java.io.File("$TRASH\\$filename")
+                if(file.exists())
+                {
+                    file.copyTo(java.io.File("$FOLDER\\$filename"))
+                    file.delete()
+                    call.respond(HttpStatusCode.OK)
+                }
+                else call.respond(HttpStatusCode.NotFound)
+            }
+        }
+    }.start(wait = true)
 }
