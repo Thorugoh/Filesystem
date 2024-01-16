@@ -6,32 +6,14 @@ import io.ktor.server.netty.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
-import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Paths
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
-import kotlin.io.path.readText
-import kotlin.io.path.writeText
 import kotlin.streams.toList
 
 const val FOLDER = "C:\\Users\\thoru\\Documents"
 const val TRASH = "C:\\Users\\thoru\\Trash"
-
-object FileShareManager {
-    private val keyGenerator = KeyGenerator.getInstance("AES").apply { init(128) }
-
-    fun listFiles(): List<String> {
-       val folderPath = Paths.get(FOLDER)
-        val files = Files.list(folderPath)
-            .filter { Files.isRegularFile(it) }
-            .map { path -> path.fileName.toString() }
-            .toList()
-
-        return files;
-    }
-
-}
 
 fun main(args: Array<String>) {
     embeddedServer(Netty, port = 8080) {
@@ -44,17 +26,37 @@ fun main(args: Array<String>) {
                 )
             }
 
+            get("/files/{name}"){
+                val filename = call.parameters["name"]
+                if(filename != null) {
+                    val decryptedStream = FileShareManager.decryptFile(filename)
+                    if(decryptedStream != null){
+                        call.response.header(
+                            HttpHeaders.ContentDisposition,
+                            ContentDisposition.Attachment.withParameter(ContentDisposition.Parameters.FileName, filename).toString()
+                        )
+                        call.respondOutputStream {
+                            decryptedStream.copyTo(this)
+                        }
+                    } else {
+                        call.respond(HttpStatusCode.NotFound, "File not found or decryption failed.")
+                    }
+                }else {
+                    call.respond(HttpStatusCode.BadRequest, "Invalid file name")
+                }
+            }
+
             post("/files") {
                 val multipart = call.receiveMultipart()
                 multipart.forEachPart { part ->
                     if(part is PartData.FileItem) {
                         println(part)
                         val name = part.originalFileName!!
-                        val file = java.io.File("$FOLDER\\$name")
-
                         part.streamProvider().use { its ->
-                            file.outputStream().use {
-                                its.copyTo(it)
+                            if(FileShareManager.createFile(name, inputStream = its)) {
+                                println("File created: $name")
+                            } else {
+                                println("Failed to create file $name")
                             }
                         }
                     }
@@ -64,10 +66,7 @@ fun main(args: Array<String>) {
 
             delete("/files/{name}") {
                 val filename = call.parameters["name"]!!
-                val file = java.io.File("$FOLDER\\$filename")
-                if(file.exists()) {
-                    file.copyTo(java.io.File("$TRASH\\$filename"))
-                    file.delete()
+                if(FileShareManager.deleteFile(filename)) {
                     call.respond(HttpStatusCode.OK)
                 }
                 else call.respond(HttpStatusCode.NotFound)
@@ -75,11 +74,7 @@ fun main(args: Array<String>) {
 
             post("/files/{name}/restore") {
                 val filename = call.parameters["name"]!!
-                val file = java.io.File("$TRASH\\$filename")
-                if(file.exists())
-                {
-                    file.copyTo(java.io.File("$FOLDER\\$filename"))
-                    file.delete()
+                if(FileShareManager.restoreFile(filename)) {
                     call.respond(HttpStatusCode.OK)
                 }
                 else call.respond(HttpStatusCode.NotFound)
